@@ -3,7 +3,7 @@
  * Plugin Name: carmo-woo-fees
  * Description: Traditional WordPress plugin with wp-scripts support.
  * Author: carmopereira
- * Version:           1.1.1
+ * Version:           1.2.0
  * Text Domain: carmo-woo-fees
  */
 
@@ -31,12 +31,12 @@ final class Carmo_Woo_Fees {
     private const FEE_DECISION_SESSION_KEY = 'carmo_woo_fees_decision';
 
     public static function init(): void {
-        add_action('woocommerce_cart_calculate_fees', [self::class, 'add_checkout_fees']);
+        // Block Checkout: Display fees in the UI (Store API)
         add_filter('woocommerce_store_api_cart_fees', [self::class, 'add_store_api_fees'], 10, 2);
 
-        // Use woocommerce_checkout_order_processed instead of woocommerce_checkout_create_order
-        // This hook is called after order creation but before redirect, works for both classic and block checkout
-        add_action('woocommerce_checkout_order_processed', [self::class, 'ensure_order_fees'], 10, 3);
+        // Cart → Order conversion: Add fees when WooCommerce creates order from cart
+        // This hook is triggered during the conversion process, perfect for adding fees
+        add_action('woocommerce_checkout_create_order_fees', [self::class, 'add_order_fees'], 10, 1);
 
         add_action('wp_enqueue_scripts', [self::class, 'enqueue_assets']);
         add_action('wp_enqueue_scripts', [self::class, 'enqueue_console_logger']);
@@ -44,18 +44,22 @@ final class Carmo_Woo_Fees {
         add_action('wp_ajax_nopriv_carmo_woo_fees_status', [self::class, 'ajax_status']);
     }
 
-    public static function add_checkout_fees(\WC_Cart $cart): void {
+    /**
+     * Add fees during Cart → Order conversion
+     * Hook: woocommerce_checkout_create_order_fees
+     */
+    public static function add_order_fees(\WC_Cart $cart): void {
         $logger = wc_get_logger();
         $log_context = ['source' => 'carmo-woo-fees'];
 
-        $logger->debug('=== add_checkout_fees CHAMADO', $log_context);
+        $logger->debug('=== add_order_fees CHAMADO (Cart → Order conversion)', $log_context);
 
-        $decision = self::get_fee_decision(true);
+        $decision = self::get_fee_decision();
         self::set_status($decision['passed'], $decision['reason']);
         self::log_status($decision['passed'], $decision['reason']);
 
         if (!$decision['passed']) {
-            $logger->warning('Validação falhou ao adicionar fees ao cart: ' . $decision['reason'], $log_context);
+            $logger->warning('Validação falhou: ' . $decision['reason'], $log_context);
             return;
         }
 
@@ -63,16 +67,18 @@ final class Carmo_Woo_Fees {
         $shipping_total = (float) $cart->get_shipping_total();
         $base_amount = $subtotal + $shipping_total;
 
-        $logger->debug("Adicionando fees ao cart: subtotal=$subtotal, shipping=$shipping_total, base=$base_amount", $log_context);
+        $logger->debug("Calculando fees: subtotal=$subtotal, shipping=$shipping_total, base=$base_amount", $log_context);
 
+        // Add percentage fee
         if ($base_amount > 0) {
             $percentage_fee = $base_amount * self::PERCENTAGE_FEE_RATE;
             $cart->add_fee(__('Fee', 'carmo-woo-fees'), $percentage_fee, false);
-            $logger->info("✓ Fee percentual adicionado ao cart: $percentage_fee", $log_context);
+            $logger->info("✓ Fee percentual adicionado: $percentage_fee", $log_context);
         }
 
+        // Add standard fee
         $cart->add_fee(__('Standard Fee', 'carmo-woo-fees'), self::STANDARD_FEE, false);
-        $logger->info("✓ Standard fee adicionado ao cart: " . self::STANDARD_FEE, $log_context);
+        $logger->info("✓ Standard fee adicionado: " . self::STANDARD_FEE, $log_context);
     }
 
     public static function add_store_api_fees(array $fees, \WC_Cart $cart): array {
@@ -81,7 +87,7 @@ final class Carmo_Woo_Fees {
 
         $logger->debug('=== add_store_api_fees CHAMADO (Block Checkout)', $log_context);
 
-        $decision = self::get_fee_decision(false);
+        $decision = self::get_fee_decision();
         self::set_status($decision['passed'], $decision['reason']);
         self::log_status($decision['passed'], $decision['reason']);
 
@@ -117,87 +123,6 @@ final class Carmo_Woo_Fees {
         $logger->debug("Total fees retornados via Store API: " . count($fees), $log_context);
 
         return $fees;
-    }
-
-    public static function ensure_order_fees(int $order_id, array $posted_data, \WC_Order $order): void {
-        $logger = wc_get_logger();
-        $log_context = ['source' => 'carmo-woo-fees'];
-
-        $logger->debug("=== ensure_order_fees CHAMADO para Order #$order_id (hook: woocommerce_checkout_order_processed)", $log_context);
-
-        $decision = self::get_fee_decision(false);
-        self::set_status($decision['passed'], $decision['reason']);
-        self::log_status($decision['passed'], $decision['reason']);
-
-        if (!$decision['passed']) {
-            $logger->warning('Validação falhou: ' . $decision['reason'], $log_context);
-            return;
-        }
-
-        $existing_fees = $order->get_items('fee');
-        $logger->debug('Fees existentes na order: ' . count($existing_fees), $log_context);
-
-        $has_percentage_fee = false;
-        $has_standard_fee = false;
-
-        foreach ($existing_fees as $fee_item) {
-            $name = $fee_item->get_name();
-            $logger->debug('Fee encontrado: ' . $name . ' = ' . $fee_item->get_total(), $log_context);
-            if ($name === __('Fee', 'carmo-woo-fees')) {
-                $has_percentage_fee = true;
-            }
-            if ($name === __('Standard Fee', 'carmo-woo-fees')) {
-                $has_standard_fee = true;
-            }
-        }
-
-        // If both fees already exist, nothing to do
-        if ($has_percentage_fee && $has_standard_fee) {
-            $logger->debug('Ambos os fees já existem, nada a fazer', $log_context);
-            return;
-        }
-
-        $cart = WC()->cart;
-        $subtotal = $cart instanceof \WC_Cart ? (float) $cart->get_subtotal() : (float) $order->get_subtotal();
-        $shipping_total = $cart instanceof \WC_Cart ? (float) $cart->get_shipping_total() : (float) $order->get_shipping_total();
-        $base_amount = $subtotal + $shipping_total;
-
-        $logger->debug("Calculando fees: subtotal=$subtotal, shipping=$shipping_total, base=$base_amount", $log_context);
-
-        if (!$has_percentage_fee && $base_amount > 0) {
-            $percentage_fee = $base_amount * self::PERCENTAGE_FEE_RATE;
-            $fee_item = new \WC_Order_Item_Fee();
-            $fee_item->set_name(__('Fee', 'carmo-woo-fees'));
-            $fee_item->set_amount($percentage_fee);
-            $fee_item->set_total($percentage_fee);
-            $fee_item->set_total_tax(0);
-            $fee_item->set_taxes(['total' => [], 'subtotal' => []]);
-            $fee_item->set_tax_class('');
-            $fee_item->set_tax_status('none');
-            $order->add_item($fee_item);
-            $logger->info("✓ Fee percentual adicionado: $percentage_fee", $log_context);
-        }
-
-        if (!$has_standard_fee) {
-            $standard_fee_item = new \WC_Order_Item_Fee();
-            $standard_fee_item->set_name(__('Standard Fee', 'carmo-woo-fees'));
-            $standard_fee_item->set_amount(self::STANDARD_FEE);
-            $standard_fee_item->set_total(self::STANDARD_FEE);
-            $standard_fee_item->set_total_tax(0);
-            $standard_fee_item->set_taxes(['total' => [], 'subtotal' => []]);
-            $standard_fee_item->set_tax_class('');
-            $standard_fee_item->set_tax_status('none');
-            $order->add_item($standard_fee_item);
-            $logger->info("✓ Standard fee adicionado: " . self::STANDARD_FEE, $log_context);
-        }
-
-        // Recalculate order totals to include the fees
-        $order->calculate_totals();
-        $logger->debug('Totais recalculados. Novo total: ' . $order->get_total(), $log_context);
-
-        // Save the order to persist fees to database
-        $order->save();
-        $logger->info('=== Order #' . $order->get_id() . ' guardada com fees', $log_context);
     }
 
     public static function enqueue_assets(): void {
@@ -249,7 +174,7 @@ final class Carmo_Woo_Fees {
 
         $status = self::get_status();
         if ($status === null) {
-            $decision = self::get_fee_decision(false);
+            $decision = self::get_fee_decision();
             $status = [
                 'passed' => $decision['passed'],
                 'reason' => $decision['reason'],
@@ -316,33 +241,22 @@ final class Carmo_Woo_Fees {
         return $cached;
     }
 
-    private static function get_fee_decision(bool $require_checkout): array {
+    private static function get_fee_decision(): array {
         $logger = wc_get_logger();
         $log_context = ['source' => 'carmo-woo-fees'];
 
         $context_info = sprintf(
-            'is_checkout=%s, wp_doing_ajax=%s, is_admin=%s, require_checkout=%s',
-            is_checkout() ? 'true' : 'false',
-            wp_doing_ajax() ? 'true' : 'false',
+            'is_admin=%s, wp_doing_ajax=%s',
             is_admin() ? 'true' : 'false',
-            $require_checkout ? 'true' : 'false'
+            wp_doing_ajax() ? 'true' : 'false'
         );
         $logger->debug("get_fee_decision() chamado: $context_info", $log_context);
 
-        // Allow frontend AJAX requests, block actual admin orders
+        // Block admin orders (but allow AJAX requests)
         if (is_admin() && !wp_doing_ajax()) {
             return [
                 'passed' => false,
-                'reason' => 'Pedido em admin.',
-            ];
-        }
-
-        // During AJAX requests, is_checkout() may return false even when in checkout context
-        // The hook woocommerce_cart_calculate_fees is only called during checkout anyway
-        if ($require_checkout && !is_checkout() && !wp_doing_ajax()) {
-            return [
-                'passed' => false,
-                'reason' => 'Não é checkout.',
+                'reason' => 'Pedido criado no admin.',
             ];
         }
 

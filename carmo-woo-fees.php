@@ -3,7 +3,7 @@
  * Plugin Name: carmo-woo-fees
  * Description: Traditional WordPress plugin with wp-scripts support.
  * Author: carmopereira
- * Version:           1.0.3
+ * Version:           1.0.5
  * Text Domain: carmo-woo-fees
  */
 
@@ -11,6 +11,16 @@ declare(strict_types=1);
 
 if (!defined('ABSPATH')) {
     exit;
+}
+
+// Check if WooCommerce plugin is active
+if (!in_array('woocommerce/woocommerce.php', apply_filters('active_plugins', get_option('active_plugins')))) {
+    add_action('admin_notices', function() {
+        echo '<div class="notice notice-error"><p>';
+        echo '<strong>carmo-woo-fees</strong> requires WooCommerce to be installed and active.';
+        echo '</p></div>';
+    });
+    return;
 }
 
 final class Carmo_Woo_Fees {
@@ -23,6 +33,7 @@ final class Carmo_Woo_Fees {
         add_action('woocommerce_cart_calculate_fees', [self::class, 'add_checkout_fees']);
         add_filter('woocommerce_store_api_cart_fees', [self::class, 'add_store_api_fees'], 10, 2);
         add_action('woocommerce_checkout_create_order', [self::class, 'ensure_order_fees'], 10, 2);
+        add_action('wp_enqueue_scripts', [self::class, 'enqueue_assets']);
         add_action('wp_enqueue_scripts', [self::class, 'enqueue_console_logger']);
         add_action('wp_ajax_carmo_woo_fees_status', [self::class, 'ajax_status']);
         add_action('wp_ajax_nopriv_carmo_woo_fees_status', [self::class, 'ajax_status']);
@@ -124,6 +135,29 @@ final class Carmo_Woo_Fees {
         $order->add_item($standard_fee_item);
     }
 
+    public static function enqueue_assets(): void {
+        if (!is_checkout()) {
+            return;
+        }
+
+        $asset_file = plugin_dir_path(__FILE__) . 'build/index.asset.php';
+        if (!file_exists($asset_file)) {
+            return;
+        }
+
+        $asset = include $asset_file;
+        $dependencies = $asset['dependencies'] ?? [];
+        $version = $asset['version'] ?? filemtime(plugin_dir_path(__FILE__) . 'build/index.js');
+
+        wp_enqueue_script(
+            'carmo-woo-fees',
+            plugin_dir_url(__FILE__) . 'build/index.js',
+            $dependencies,
+            $version,
+            true
+        );
+    }
+
     public static function enqueue_console_logger(): void {
         if (!is_checkout()) {
             return;
@@ -188,7 +222,8 @@ final class Carmo_Woo_Fees {
     }
 
     private static function get_fee_decision(bool $require_checkout): array {
-        if (is_admin()) {
+        // Allow frontend AJAX requests, block actual admin orders
+        if (is_admin() && !wp_doing_ajax()) {
             return [
                 'passed' => false,
                 'reason' => 'Pedido em admin.',
@@ -243,4 +278,4 @@ final class Carmo_Woo_Fees {
     }
 }
 
-Carmo_Woo_Fees::init();
+add_action('woocommerce_init', [Carmo_Woo_Fees::class, 'init']);

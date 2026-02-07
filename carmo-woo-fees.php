@@ -3,7 +3,7 @@
  * Plugin Name: carmo-woo-fees
  * Description: Traditional WordPress plugin with wp-scripts support.
  * Author: carmopereira
- * Version:           1.0.5
+ * Version:           1.0.7
  * Text Domain: carmo-woo-fees
  */
 
@@ -103,11 +103,22 @@ final class Carmo_Woo_Fees {
         }
 
         $existing_fees = $order->get_items('fee');
+        $has_percentage_fee = false;
+        $has_standard_fee = false;
+
         foreach ($existing_fees as $fee_item) {
             $name = $fee_item->get_name();
-            if ($name === __('Fee', 'carmo-woo-fees') || $name === __('Standard Fee', 'carmo-woo-fees')) {
-                return;
+            if ($name === __('Fee', 'carmo-woo-fees')) {
+                $has_percentage_fee = true;
             }
+            if ($name === __('Standard Fee', 'carmo-woo-fees')) {
+                $has_standard_fee = true;
+            }
+        }
+
+        // If both fees already exist, nothing to do
+        if ($has_percentage_fee && $has_standard_fee) {
+            return;
         }
 
         $cart = WC()->cart;
@@ -115,24 +126,36 @@ final class Carmo_Woo_Fees {
         $shipping_total = $cart instanceof \WC_Cart ? (float) $cart->get_shipping_total() : (float) $order->get_shipping_total();
         $base_amount = $subtotal + $shipping_total;
 
-        if ($base_amount > 0) {
+        if (!$has_percentage_fee && $base_amount > 0) {
             $percentage_fee = $base_amount * self::PERCENTAGE_FEE_RATE;
             $fee_item = new \WC_Order_Item_Fee();
             $fee_item->set_name(__('Fee', 'carmo-woo-fees'));
             $fee_item->set_amount($percentage_fee);
             $fee_item->set_total($percentage_fee);
+            $fee_item->set_total_tax(0);
+            $fee_item->set_taxes(['total' => [], 'subtotal' => []]);
             $fee_item->set_tax_class('');
             $fee_item->set_tax_status('none');
             $order->add_item($fee_item);
         }
 
-        $standard_fee_item = new \WC_Order_Item_Fee();
-        $standard_fee_item->set_name(__('Standard Fee', 'carmo-woo-fees'));
-        $standard_fee_item->set_amount(self::STANDARD_FEE);
-        $standard_fee_item->set_total(self::STANDARD_FEE);
-        $standard_fee_item->set_tax_class('');
-        $standard_fee_item->set_tax_status('none');
-        $order->add_item($standard_fee_item);
+        if (!$has_standard_fee) {
+            $standard_fee_item = new \WC_Order_Item_Fee();
+            $standard_fee_item->set_name(__('Standard Fee', 'carmo-woo-fees'));
+            $standard_fee_item->set_amount(self::STANDARD_FEE);
+            $standard_fee_item->set_total(self::STANDARD_FEE);
+            $standard_fee_item->set_total_tax(0);
+            $standard_fee_item->set_taxes(['total' => [], 'subtotal' => []]);
+            $standard_fee_item->set_tax_class('');
+            $standard_fee_item->set_tax_status('none');
+            $order->add_item($standard_fee_item);
+        }
+
+        // Recalculate order totals to include the fees
+        $order->calculate_totals();
+
+        // Save the order to persist fees to database
+        $order->save();
     }
 
     public static function enqueue_assets(): void {

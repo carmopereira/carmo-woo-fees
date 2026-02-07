@@ -3,7 +3,7 @@
  * Plugin Name: carmo-woo-fees
  * Description: Traditional WordPress plugin with wp-scripts support.
  * Author: carmopereira
- * Version:           1.0.7
+ * Version:           1.0.8
  * Text Domain: carmo-woo-fees
  */
 
@@ -28,6 +28,7 @@ final class Carmo_Woo_Fees {
     private const STANDARD_FEE = 54.69;
     private const PERCENTAGE_FEE_RATE = 0.15;
     private const STATUS_SESSION_KEY = 'carmo_woo_fees_status';
+    private const FEE_DECISION_SESSION_KEY = 'carmo_woo_fees_decision';
 
     public static function init(): void {
         add_action('woocommerce_cart_calculate_fees', [self::class, 'add_checkout_fees']);
@@ -195,7 +196,7 @@ final class Carmo_Woo_Fees {
         ];
 
         $inline_script = sprintf(
-            'window.carmoWooFees=%s;document.addEventListener("DOMContentLoaded",function(){var logStatus=function(){var data=new FormData();data.append("action","carmo_woo_fees_status");data.append("nonce",window.carmoWooFees.nonce);fetch(window.carmoWooFees.ajaxUrl,{method:"POST",credentials:"same-origin",body:data}).then(function(r){return r.json();}).then(function(resp){if(!resp||!resp.success){console.log("[carmo-woo-fees] Sem estado disponível.");return;}var s=resp.data||{};console.log("[carmo-woo-fees]",s.passed?"PASSOU":"NÃO PASSOU",s.reason||"");}).catch(function(){console.log("[carmo-woo-fees] Erro ao obter estado.");});};logStatus();if(window.jQuery){jQuery(document.body).on("updated_checkout",logStatus);}});',
+            'window.carmoWooFees=%s;document.addEventListener("DOMContentLoaded",function(){var logStatus=function(){console.log("[carmo-woo-fees] Checking fee status...");var data=new FormData();data.append("action","carmo_woo_fees_status");data.append("nonce",window.carmoWooFees.nonce);fetch(window.carmoWooFees.ajaxUrl,{method:"POST",credentials:"same-origin",body:data}).then(function(r){return r.json();}).then(function(resp){if(!resp||!resp.success){console.warn("[carmo-woo-fees] No status available");return;}var s=resp.data||{};if(s.passed){console.log("[carmo-woo-fees] ✓ PASSOU -",s.reason||"");}else{console.warn("[carmo-woo-fees] ✗ NÃO PASSOU -",s.reason||"");}}).catch(function(e){console.error("[carmo-woo-fees] Error:",e);});};logStatus();if(window.jQuery){jQuery(document.body).on("updated_checkout payment_method_selected",logStatus);}var emailField=document.querySelector("input[type=email]");if(emailField){var debounceTimer;emailField.addEventListener("blur",function(){clearTimeout(debounceTimer);debounceTimer=setTimeout(logStatus,1000);});}});',
             wp_json_encode($payload)
         );
 
@@ -244,6 +245,36 @@ final class Carmo_Woo_Fees {
         return $status;
     }
 
+    private static function cache_fee_decision(array $decision): void {
+        if (!WC()->session) {
+            return;
+        }
+
+        WC()->session->set(
+            self::FEE_DECISION_SESSION_KEY,
+            array_merge($decision, ['timestamp' => time()])
+        );
+    }
+
+    private static function get_cached_fee_decision(): ?array {
+        if (!WC()->session) {
+            return null;
+        }
+
+        $cached = WC()->session->get(self::FEE_DECISION_SESSION_KEY);
+        if (!is_array($cached)) {
+            return null;
+        }
+
+        // Cache valid for 5 minutes
+        $age = time() - ($cached['timestamp'] ?? 0);
+        if ($age > 300) {
+            return null;
+        }
+
+        return $cached;
+    }
+
     private static function get_fee_decision(bool $require_checkout): array {
         // Allow frontend AJAX requests, block actual admin orders
         if (is_admin() && !wp_doing_ajax()) {
@@ -271,25 +302,54 @@ final class Carmo_Woo_Fees {
         }
 
         $customer = WC()->customer;
-        if (!$customer instanceof \WC_Customer) {
+        $country = '';
+
+        // Try to get customer and country
+        if ($customer instanceof \WC_Customer) {
+            // First try shipping country
+            $country = (string) $customer->get_shipping_country();
+
+            // Fallback to billing country if shipping is empty
+            if (empty($country)) {
+                $country = (string) $customer->get_billing_country();
+            }
+        }
+
+        // If customer is temporarily unavailable, check cache
+        if (empty($country)) {
+            $cached_decision = self::get_cached_fee_decision();
+
+            // If we had a recent positive decision, trust it
+            if ($cached_decision !== null && $cached_decision['passed'] === true) {
+                return [
+                    'passed' => true,
+                    'reason' => 'Usando decisão em cache (cliente temporariamente indisponível).',
+                ];
+            }
+
+            // No customer and no cached decision - reject
             return [
                 'passed' => false,
-                'reason' => 'Cliente WooCommerce indisponível.',
+                'reason' => 'Cliente WooCommerce indisponível e sem cache.',
             ];
         }
 
-        $country = (string) $customer->get_shipping_country();
+        // Validate country is US
         if (strtoupper($country) !== 'US') {
-            return [
+            $decision = [
                 'passed' => false,
                 'reason' => sprintf('País de envio "%s" não é US.', $country),
             ];
+            self::cache_fee_decision($decision);
+            return $decision;
         }
 
-        return [
+        $decision = [
             'passed' => true,
             'reason' => 'Filtros passaram. Taxas aplicadas.',
         ];
+        self::cache_fee_decision($decision);
+        return $decision;
     }
 
     private static function log_status(bool $passed, string $reason): void {

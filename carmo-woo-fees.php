@@ -3,7 +3,7 @@
  * Plugin Name: carmo-woo-fees
  * Description: Traditional WordPress plugin with wp-scripts support.
  * Author: carmopereira
- * Version:           1.1.0
+ * Version:           1.1.1
  * Text Domain: carmo-woo-fees
  */
 
@@ -33,7 +33,11 @@ final class Carmo_Woo_Fees {
     public static function init(): void {
         add_action('woocommerce_cart_calculate_fees', [self::class, 'add_checkout_fees']);
         add_filter('woocommerce_store_api_cart_fees', [self::class, 'add_store_api_fees'], 10, 2);
-        add_action('woocommerce_checkout_create_order', [self::class, 'ensure_order_fees'], 10, 2);
+
+        // Use woocommerce_checkout_order_processed instead of woocommerce_checkout_create_order
+        // This hook is called after order creation but before redirect, works for both classic and block checkout
+        add_action('woocommerce_checkout_order_processed', [self::class, 'ensure_order_fees'], 10, 3);
+
         add_action('wp_enqueue_scripts', [self::class, 'enqueue_assets']);
         add_action('wp_enqueue_scripts', [self::class, 'enqueue_console_logger']);
         add_action('wp_ajax_carmo_woo_fees_status', [self::class, 'ajax_status']);
@@ -72,17 +76,25 @@ final class Carmo_Woo_Fees {
     }
 
     public static function add_store_api_fees(array $fees, \WC_Cart $cart): array {
+        $logger = wc_get_logger();
+        $log_context = ['source' => 'carmo-woo-fees'];
+
+        $logger->debug('=== add_store_api_fees CHAMADO (Block Checkout)', $log_context);
+
         $decision = self::get_fee_decision(false);
         self::set_status($decision['passed'], $decision['reason']);
         self::log_status($decision['passed'], $decision['reason']);
 
         if (!$decision['passed']) {
+            $logger->warning('Validação falhou ao adicionar fees via Store API: ' . $decision['reason'], $log_context);
             return $fees;
         }
 
         $subtotal = (float) $cart->get_subtotal();
         $shipping_total = (float) $cart->get_shipping_total();
         $base_amount = $subtotal + $shipping_total;
+
+        $logger->debug("Store API fees: subtotal=$subtotal, shipping=$shipping_total, base=$base_amount", $log_context);
 
         if ($base_amount > 0) {
             $percentage_fee = $base_amount * self::PERCENTAGE_FEE_RATE;
@@ -92,6 +104,7 @@ final class Carmo_Woo_Fees {
                 'amount' => wc_add_number_precision($percentage_fee),
                 'taxable' => false,
             ];
+            $logger->info("✓ Fee percentual adicionado via Store API: $percentage_fee", $log_context);
         }
 
         $fees[] = [
@@ -100,15 +113,17 @@ final class Carmo_Woo_Fees {
             'amount' => wc_add_number_precision(self::STANDARD_FEE),
             'taxable' => false,
         ];
+        $logger->info("✓ Standard fee adicionado via Store API: " . self::STANDARD_FEE, $log_context);
+        $logger->debug("Total fees retornados via Store API: " . count($fees), $log_context);
 
         return $fees;
     }
 
-    public static function ensure_order_fees(\WC_Order $order, array $data): void {
+    public static function ensure_order_fees(int $order_id, array $posted_data, \WC_Order $order): void {
         $logger = wc_get_logger();
         $log_context = ['source' => 'carmo-woo-fees'];
 
-        $logger->debug('=== ensure_order_fees CHAMADO para Order #' . $order->get_id(), $log_context);
+        $logger->debug("=== ensure_order_fees CHAMADO para Order #$order_id (hook: woocommerce_checkout_order_processed)", $log_context);
 
         $decision = self::get_fee_decision(false);
         self::set_status($decision['passed'], $decision['reason']);

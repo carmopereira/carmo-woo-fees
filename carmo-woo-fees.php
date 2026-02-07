@@ -3,7 +3,7 @@
  * Plugin Name: carmo-woo-fees
  * Description: Traditional WordPress plugin with wp-scripts support.
  * Author: carmopereira
- * Version:           1.0.9
+ * Version:           1.1.0
  * Text Domain: carmo-woo-fees
  */
 
@@ -302,6 +302,18 @@ final class Carmo_Woo_Fees {
     }
 
     private static function get_fee_decision(bool $require_checkout): array {
+        $logger = wc_get_logger();
+        $log_context = ['source' => 'carmo-woo-fees'];
+
+        $context_info = sprintf(
+            'is_checkout=%s, wp_doing_ajax=%s, is_admin=%s, require_checkout=%s',
+            is_checkout() ? 'true' : 'false',
+            wp_doing_ajax() ? 'true' : 'false',
+            is_admin() ? 'true' : 'false',
+            $require_checkout ? 'true' : 'false'
+        );
+        $logger->debug("get_fee_decision() chamado: $context_info", $log_context);
+
         // Allow frontend AJAX requests, block actual admin orders
         if (is_admin() && !wp_doing_ajax()) {
             return [
@@ -310,7 +322,9 @@ final class Carmo_Woo_Fees {
             ];
         }
 
-        if ($require_checkout && !is_checkout()) {
+        // During AJAX requests, is_checkout() may return false even when in checkout context
+        // The hook woocommerce_cart_calculate_fees is only called during checkout anyway
+        if ($require_checkout && !is_checkout() && !wp_doing_ajax()) {
             return [
                 'passed' => false,
                 'reason' => 'Não é checkout.',

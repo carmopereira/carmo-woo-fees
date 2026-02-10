@@ -13,3 +13,6 @@ Thumbs.db
 *.swp
 
 *.log
+
+# Plugin zip files
+carmo-woo-fees-v*.zip

@@ -1,6 +1,6 @@
 {
 	"name": "carmo-woo-fees",
-	"version": "1.0.23",
+	"version": "1.0.24",
 	"description": "",
 	"main": "index.js",
 	"scripts": {
@@ -8,7 +8,9 @@
 		"build": "wp-scripts build",
 		"prebuild": "npm version patch --no-git-tag-version && node scripts/sync-version.js",
 		"updateGIT": "node scripts/update-git.js",
-		"symlink": "node scripts/create-symlink.js"
+		"symlink": "node scripts/create-symlink.js",
+		"package": "node scripts/create-zip.js",
+		"zip": "npm run package"
 	},
 	"keywords": [],
 	"author": "",

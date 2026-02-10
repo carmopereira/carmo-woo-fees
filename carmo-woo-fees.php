@@ -3,7 +3,7 @@
  * Plugin Name: carmo-woo-fees
  * Description: Traditional WordPress plugin with wp-scripts support.
  * Author: carmopereira
- * Version:           1.0.17
+ * Version:           1.0.21
  * Text Domain: carmo-woo-fees
  */
 
@@ -26,10 +26,164 @@ if (!in_array('woocommerce/woocommerce.php', apply_filters('active_plugins', get
 final class Carmo_Woo_Fees {
     private const STANDARD_FEE = 54.69;
     private const PERCENTAGE_FEE_RATE = 0.15;
+    private const TARGET_SHIPPING_METHOD_ID = 56;
 
     public static function init(): void {
         // Simple hook to add fees to cart
         add_action('woocommerce_cart_calculate_fees', [self::class, 'add_fees']);
+
+        // Track when Flexible Shipping method 56 is calculated
+        add_filter('flexible_shipping_method_rate_id', [self::class, 'track_method_56_rate_id'], 10, 2);
+
+        // Add browser console debugging
+        add_action('wp_footer', [self::class, 'add_console_debug']);
+
+        // AJAX endpoint for debug info
+        add_action('wp_ajax_carmo_woo_fees_debug', [self::class, 'ajax_debug_info']);
+        add_action('wp_ajax_nopriv_carmo_woo_fees_debug', [self::class, 'ajax_debug_info']);
+    }
+
+    /**
+     * AJAX handler to get debug info
+     */
+    public static function ajax_debug_info(): void {
+        $session_key = WC()->session ? WC()->session->get_customer_id() : 'guest';
+        $method_56_rate_id = get_transient('carmo_woo_fees_method_56_rate_id_' . $session_key);
+        $chosen_methods = WC()->session ? WC()->session->get('chosen_shipping_methods') : [];
+
+        $match_status = 'N/A';
+        $match_method = '';
+
+        if (!empty($chosen_methods) && is_array($chosen_methods)) {
+            $chosen = $chosen_methods[0];
+
+            // Check method 1: Stored rate ID
+            if (!empty($method_56_rate_id) && $chosen === $method_56_rate_id) {
+                $match_status = '✅ MATCH (via stored rate ID)';
+                $match_method = 'Stored Rate ID';
+            }
+            // Check method 2: Rate ID pattern (ends with :56)
+            elseif (preg_match('/:' . self::TARGET_SHIPPING_METHOD_ID . '$/', $chosen)) {
+                $match_status = '✅ MATCH (via :56 pattern)';
+                $match_method = 'Rate ID Pattern';
+            }
+            // Check method 3: Numeric ID in string
+            elseif (strpos($chosen, 'flexible_shipping') !== false) {
+                if (preg_match_all('/\d+/', $chosen, $matches)) {
+                    if (in_array((string)self::TARGET_SHIPPING_METHOD_ID, $matches[0], true)) {
+                        $match_status = '✅ MATCH (via numeric ID)';
+                        $match_method = 'Numeric ID in String';
+                    } else {
+                        $match_status = '❌ No match';
+                    }
+                } else {
+                    $match_status = '❌ No match';
+                }
+            } else {
+                $match_status = '❌ No match - not a Flexible Shipping method';
+            }
+        }
+
+        wp_send_json_success([
+            'session_key' => $session_key,
+            'method_56_rate_id' => $method_56_rate_id,
+            'chosen_methods' => $chosen_methods,
+            'target_method_id' => self::TARGET_SHIPPING_METHOD_ID,
+            'match_status' => $match_status,
+            'match_method' => $match_method,
+        ]);
+    }
+
+    /**
+     * Add browser console debugging (dynamic)
+     */
+    public static function add_console_debug(): void {
+        if (!is_checkout() && !is_cart()) {
+            return;
+        }
+        ?>
+        <script>
+        (function() {
+            function logCarmoDebug() {
+                console.log('=== Carmo Woo Fees Debug (Updated) ===');
+                console.log('Timestamp:', new Date().toLocaleTimeString());
+
+                // Get current shipping method selection from DOM
+                const shippingInputs = document.querySelectorAll('input[name^="shipping_method"]');
+                const selectedMethod = Array.from(shippingInputs).find(input => input.checked);
+                console.log('Selected Shipping Method (DOM):', selectedMethod ? selectedMethod.value : 'none');
+
+                // Make AJAX call to get server-side debug info
+                jQuery.ajax({
+                    url: '<?php echo admin_url('admin-ajax.php'); ?>',
+                    type: 'POST',
+                    data: {
+                        action: 'carmo_woo_fees_debug'
+                    },
+                    success: function(response) {
+                        if (response.success) {
+                            console.log('Session Key:', response.data.session_key);
+                            console.log('Stored Method 56 Rate ID:', response.data.method_56_rate_id);
+                            console.log('Chosen Shipping Methods (Server):', response.data.chosen_methods);
+                            console.log('Target Method ID:', response.data.target_method_id);
+                            console.log('Match Status:', response.data.match_status);
+                            if (response.data.match_method) {
+                                console.log('Match Method:', response.data.match_method);
+                            }
+                        }
+                    }
+                });
+            }
+
+            // Log on page load
+            logCarmoDebug();
+
+            // Log when checkout updates (shipping method changed)
+            jQuery(document.body).on('updated_checkout', function() {
+                console.log('🔄 Checkout updated - refreshing debug info...');
+                setTimeout(logCarmoDebug, 500); // Small delay to let WooCommerce update session
+            });
+
+            // Log when cart updates
+            jQuery(document.body).on('updated_cart_totals', function() {
+                console.log('🔄 Cart updated - refreshing debug info...');
+                setTimeout(logCarmoDebug, 500);
+            });
+        })();
+        </script>
+        <?php
+    }
+
+    /**
+     * Track the rate ID for Flexible Shipping method 56
+     *
+     * @param string $rate_id The formatted rate ID (e.g., flexible_shipping_1_express)
+     * @param array $shipping_method The method settings including internal ID
+     * @return string The unmodified rate ID (pass-through filter)
+     */
+    public static function track_method_56_rate_id(string $rate_id, array $shipping_method): string {
+        $logger = wc_get_logger();
+        $log_context = ['source' => 'carmo-woo-fees'];
+
+        // DEBUG: Log all method data
+        $method_id = $shipping_method['id'] ?? null;
+        $logger->info("=== Flexible Shipping Method Rate ID Hook ===", $log_context);
+        $logger->info("Rate ID: $rate_id", $log_context);
+        $logger->info("Method ID: " . var_export($method_id, true), $log_context);
+        $logger->info("Full shipping_method array: " . print_r($shipping_method, true), $log_context);
+
+        // Check if this is method 56
+        if ($method_id == self::TARGET_SHIPPING_METHOD_ID) {
+            // Store the rate ID in a transient for this session
+            $session_key = WC()->session ? WC()->session->get_customer_id() : 'guest';
+            set_transient('carmo_woo_fees_method_56_rate_id_' . $session_key, $rate_id, HOUR_IN_SECONDS);
+
+            $logger->info("✓✓✓ MATCHED! Tracked method 56 with rate ID: $rate_id (session: $session_key)", $log_context);
+        } else {
+            $logger->info("Method ID '$method_id' does not match target " . self::TARGET_SHIPPING_METHOD_ID, $log_context);
+        }
+
+        return $rate_id;
     }
 
     /**
@@ -69,7 +223,59 @@ final class Carmo_Woo_Fees {
             return;
         }
 
-        $logger->info('✓ Shipping country is US - applying fees', $log_context);
+        $logger->info('✓ Shipping country is US', $log_context);
+
+        // Only apply fees if Flexible Shipping method 56 is selected
+        $chosen_methods = WC()->session->get('chosen_shipping_methods');
+        $logger->info("DEBUG: Chosen shipping methods: " . print_r($chosen_methods, true), $log_context);
+
+        if (empty($chosen_methods) || !is_array($chosen_methods)) {
+            $logger->info('Fees not applied - no shipping method chosen', $log_context);
+            return;
+        }
+
+        $chosen_method = $chosen_methods[0]; // First shipping method
+        $logger->info("DEBUG: Selected method: '$chosen_method'", $log_context);
+
+        // Get the stored rate ID for method 56
+        $session_key = WC()->session->get_customer_id();
+        $logger->info("DEBUG: Session key: '$session_key'", $log_context);
+
+        $method_56_rate_id = get_transient('carmo_woo_fees_method_56_rate_id_' . $session_key);
+        $logger->info("DEBUG: Stored method 56 rate ID: " . var_export($method_56_rate_id, true), $log_context);
+
+        // Check if method 56 is selected
+        $is_method_56 = false;
+
+        // Method 1: Check against stored rate ID (from hook)
+        if (!empty($method_56_rate_id) && $chosen_method === $method_56_rate_id) {
+            $is_method_56 = true;
+            $logger->info("✓ Matched via stored rate ID", $log_context);
+        }
+
+        // Method 2: Fallback - check if rate ID contains :56 (flexible_shipping_single:56)
+        if (!$is_method_56 && preg_match('/:' . self::TARGET_SHIPPING_METHOD_ID . '$/', $chosen_method)) {
+            $is_method_56 = true;
+            $logger->info("✓ Matched via rate ID pattern (ends with :" . self::TARGET_SHIPPING_METHOD_ID . ")", $log_context);
+        }
+
+        // Method 3: Additional fallback - check flexible_shipping with method 56
+        if (!$is_method_56 && strpos($chosen_method, 'flexible_shipping') !== false) {
+            // Extract any numeric IDs from the rate ID
+            if (preg_match_all('/\d+/', $chosen_method, $matches)) {
+                if (in_array((string)self::TARGET_SHIPPING_METHOD_ID, $matches[0], true)) {
+                    $is_method_56 = true;
+                    $logger->info("✓ Matched via numeric ID in rate string", $log_context);
+                }
+            }
+        }
+
+        if (!$is_method_56) {
+            $logger->info("Fees not applied - chosen method '$chosen_method' is not method 56", $log_context);
+            return;
+        }
+
+        $logger->info('✓ Flexible Shipping method 56 is selected - applying fees', $log_context);
 
         $subtotal = (float) $cart->get_subtotal();
         $shipping_total = (float) $cart->get_shipping_total();

@@ -96,8 +96,14 @@ final class Carmo_Woo_Fees {
 
     /**
      * Add browser console debugging (dynamic)
+     * Only enabled when URL contains ?debug=1
      */
     public static function add_console_debug(): void {
+        // Only enable debug mode when explicitly requested via URL parameter
+        if (!isset($_GET['debug']) || $_GET['debug'] !== '1') {
+            return;
+        }
+
         if (!is_checkout() && !is_cart()) {
             return;
         }

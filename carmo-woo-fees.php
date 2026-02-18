@@ -3,7 +3,7 @@
  * Plugin Name: carmo-woo-fees
  * Description: Traditional WordPress plugin with wp-scripts support.
  * Author: carmopereira
- * Version:           1.0.24
+ * Version:           1.0.25
  * Text Domain: carmo-woo-fees
  */
 
